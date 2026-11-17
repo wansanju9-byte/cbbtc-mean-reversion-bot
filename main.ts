@@ -6,6 +6,8 @@
 // that average it spends all its cash on CBBTC. It sells the whole position
 // when the close recovers to at least 0.5% above the average, or as a stop
 // when the close falls 2% below the entry close or 2% below the average.
+// After a stop-loss exit the bot sits out for 60 bars, so it cannot buy
+// straight back into the same falling market that just stopped it out.
 // After bar 1200, if it still has not traded, the entry band widens to
 // 0.2% so the bot is very likely to make the one trade the guardrails need.
 //
@@ -42,6 +44,7 @@ const MAX_SLIPPAGE_BPS = 100; // 1% past the close the order was decided on
 
 const closes: number[] = [];
 let entryClose: number | null = null;
+let cooldownUntil = 0; // seq before which no new buy after a stop-loss exit
 
 await runBars({
   onBatch(state: BarsState) {
@@ -58,11 +61,11 @@ await runBars({
 
     if (held !== undefined) {
       // Sell the whole position on a rip above the average, or on a stop.
-      if (
-        price >= avg * (1 + EXIT_BAND) ||
+      const stopped =
         (entryClose !== null && price <= entryClose * (1 - STOP_FROM_ENTRY)) ||
-        price <= avg * (1 - STOP_BELOW_SMA)
-      ) {
+        price <= avg * (1 - STOP_BELOW_SMA);
+      if (price >= avg * (1 + EXIT_BAND) || stopped) {
+        if (stopped) cooldownUntil = state.seq + 60;
         entryClose = null;
         const sell: SellInput = { side: 'sell', symbol: SYMBOL, qty: held.qty, max_slippage_bps: MAX_SLIPPAGE_BPS };
         return [sell];
@@ -71,6 +74,8 @@ await runBars({
     }
 
     // Flat: buy a dip below the average, full size, once per dip.
+    // Never re-enter while the post-stop cooldown is running.
+    if (state.seq < cooldownUntil) return [];
     const band = state.seq >= LATE_BAR ? LATE_ENTRY_BAND : ENTRY_BAND;
     if (price <= avg * (1 - band)) {
       const cash = state.cash;
